@@ -7,7 +7,6 @@
 //
 
 #include "YUVFrameInputPlugin.h"
-
 #include <cstring>
 #include <sstream>
 #include <fstream>
@@ -178,6 +177,14 @@ Java_com_wikitude_samples_CustomCameraActivity_notifyNewCameraFrame(JNIEnv* env,
     const int correctedRedDataSize = widthChrominance * heightChrominance;
 
     size_t frameDataSize = correctedLuminanceDataSize + correctedBlueDataSize + correctedRedDataSize;
+
+    __android_log_print(ANDROID_LOG_VERBOSE, APPNAME, "frameDataSize=%u, correctedLuminanceDataSize=%d,"
+            " correctedBlueDataSize=%d, correctedRedDataSize=%d",
+            frameDataSize,
+            correctedLuminanceDataSize,
+            correctedBlueDataSize,
+            correctedRedDataSize);
+
     std::shared_ptr<unsigned char> frameData = std::shared_ptr<unsigned char>(new unsigned char[frameDataSize], [](unsigned char* data) {
         delete [] data;
     });
@@ -359,6 +366,18 @@ void YUVFrameInputPlugin::destroy() {
 
 void YUVFrameInputPlugin::startRender() {
 
+
+}
+
+jbyteArray as_byte_array(unsigned char* buf, int len) {
+    JavaVMResource vm(pluginJavaVM);
+    jbyteArray array = vm.env->NewByteArray (len);
+    vm.env->SetByteArrayRegion (array, 0, len, reinterpret_cast<jbyte*>(buf));
+    return array;
+}
+
+void YUVFrameInputPlugin::endRender() {
+
     if (!_frameSizeInitialized.load()) {
         return;
     }
@@ -367,11 +386,159 @@ void YUVFrameInputPlugin::startRender() {
         _renderingInitialized.store(setupRendering());
     }
 
-    render();
-}
+    // render();
 
-void YUVFrameInputPlugin::endRender() {
+    { // shared_ptr auto release scope
+        std::shared_ptr<unsigned char> presentableFrameData = getPresentableInputFrameData();
+        if (presentableFrameData) {
+            updateFrameTexturesData(_frameWidth, _frameHeight, presentableFrameData.get());
+        }
+    }
 
+    WT_GL_ASSERT(glDisable(GL_DEPTH_TEST));
+
+    WT_GL_ASSERT(glUseProgram(_programHandle));
+
+    WT_GL_ASSERT(glBindBuffer(GL_ARRAY_BUFFER, _vertexBuffer));
+    WT_GL_ASSERT(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _indexBuffer));
+
+    WT_GL_ASSERT(glEnableVertexAttribArray(_positionAttributeLocation));
+    WT_GL_ASSERT(glEnableVertexAttribArray(_texCoordAttributeLocation));
+
+    WT_GL_ASSERT(glVertexAttribPointer(_positionAttributeLocation, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), 0));
+    WT_GL_ASSERT(glVertexAttribPointer(_texCoordAttributeLocation, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid *)(sizeof(float) * 3)));
+
+    bindFrameTextures();
+
+    bindFrameBufferObject();
+
+    GLint viewport[4];
+    glGetIntegerv(GL_VIEWPORT, viewport);
+
+    const float viewportWidth = viewport[2] - viewport[0];
+    const float viewportHeight = viewport[3] - viewport[1];
+
+    WT_GL_ASSERT(glViewport(0, 0, _frameWidth, _frameHeight));
+    WT_GL_ASSERT(glClear(GL_COLOR_BUFFER_BIT));
+    WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
+    unbindFrameBufferObject();
+
+    WT_GL_ASSERT(glViewport(viewport[0], viewport[1], viewport[2], viewport[3]));
+
+    WT_GL_ASSERT(glClear(GL_COLOR_BUFFER_BIT));
+
+    WT_GL_ASSERT(glActiveTexture(GL_TEXTURE0));
+    WT_GL_ASSERT(glBindTexture(GL_TEXTURE_2D, _frameBufferTexture));
+
+    { // mutex auto release scope
+    std::unique_lock<std::mutex> lock(_currentlyRecognizedTargetsMutex);
+
+        if (!_currentlyRecognizedTargets.empty()) {
+
+            // just use one of the targets found, should be sufficient to get the point across
+            const wikitude::sdk::RecognizedTarget targetToDraw = _currentlyRecognizedTargets.front();
+
+            // early unlock to minimize locking duration
+            lock.unlock();
+
+            WT_GL_ASSERT(glUseProgram(_fullscreenTextureShader));
+            setVertexShaderUniforms(_fullscreenTextureShader);
+
+            GLint fullscreenTextureUniformLocation;
+            WT_GL_ASSERT_AND_RETURN(fullscreenTextureUniformLocation, glGetUniformLocation(_fullscreenTextureShader, "uCameraFrameTexture"));
+            WT_GL_ASSERT(glUniform1i(fullscreenTextureUniformLocation, 0));
+
+            setVertexAttributes(_fullscreenTextureShader);
+
+            WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
+
+            const float TARGET_HEIGHT_IN_PIXELS = 320.0f;
+
+            // TODO: can be computed in the ctor
+            wikitude::sdk::Matrix4 quadReuseMatrix;
+            // scale that transforms the fullscreen quad (side length = 2) into a screen
+            // aligned quad with side length = 1, there avoiding additional vertex data to be
+            // required
+            // sadly no attribute-less rendering available on OpenGL ES 2 due to the lack of
+            // gl_VertexId
+            quadReuseMatrix.scale(0.5f, 0.5f, 1.0f);
+
+            wikitude::sdk::Matrix4 targetHeightScaling;
+            targetHeightScaling.scale(TARGET_HEIGHT_IN_PIXELS, TARGET_HEIGHT_IN_PIXELS, 1.0f);
+
+            wikitude::sdk::Matrix4 modelView = targetToDraw.getModelViewMatrix();
+            wikitude::sdk::Matrix4 projection = targetToDraw.getProjectionMatrix();
+
+            wikitude::sdk::Matrix4 sensorRotationCompensation;
+
+            float sensorRotationCompensationAngle = static_cast<float>(_imageSensorRotation);
+            if (!_defaultOrientationLandscape) {
+                sensorRotationCompensationAngle += 90.0f;
+            }
+
+            sensorRotationCompensation.rotateZ(sensorRotationCompensationAngle);
+
+            wikitude::sdk::Matrix4 modelViewProjection = sensorRotationCompensation * projection * modelView * targetHeightScaling * quadReuseMatrix;
+
+            WT_GL_ASSERT(glUseProgram(_augmentationShaderHandle));
+            GLint modelViewProjectionLocation;
+            WT_GL_ASSERT_AND_RETURN(modelViewProjectionLocation, glGetUniformLocation(_augmentationShaderHandle, "uModelViewProjectionMatrix"));
+            WT_GL_ASSERT(glUniformMatrix4fv(modelViewProjectionLocation, 1, GL_FALSE, modelViewProjection.get()));
+
+            setVertexAttributes(_augmentationShaderHandle);
+
+            WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
+        } else {
+            WT_GL_ASSERT(glUseProgram(_scanlineShaderHandle));
+            setVertexShaderUniforms(_scanlineShaderHandle);
+
+            setFragmentShaderUniforms(viewportWidth, viewportHeight);
+            setVertexAttributes(_scanlineShaderHandle);
+
+            WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
+        }
+    }
+
+    int size = 1080*1920*4;
+    GLubyte *data = (GLubyte *)malloc(size);
+    WT_GL_ASSERT(glReadPixels(0, 0 , 1920, 1080, GL_RGBA, GL_UNSIGNED_BYTE, data));
+
+    WT_GL_ASSERT(glBindBuffer(GL_ARRAY_BUFFER, 0));
+    WT_GL_ASSERT(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
+
+    WT_GL_ASSERT(glUseProgram(0));
+
+    WT_GL_ASSERT(glEnable(GL_DEPTH_TEST));
+
+    if (data != nullptr) {
+        JavaVMResource vm(pluginJavaVM);
+        //unsigned char *arr = new unsigned char[10];
+
+        jbyteArray array = vm.env->NewByteArray(size);
+        vm.env->SetByteArrayRegion(array, 0, size, reinterpret_cast<jbyte*>(data));
+
+        vm.env->CallVoidMethod(customCameraActivity, _pluginEndRenderId, array);
+        //vm.env->CallVoidMethod(customCameraActivity, _pluginEndRenderId, as_byte_array(frame.get(),
+        //            setting.getInputFrameSize().width * setting.getInputFrameSize().height * 3));
+    }
+
+    /*
+    std::shared_ptr<unsigned char> frame = getPresentableInputFrameData();
+    wikitude::sdk::InputFrameSettings &setting = getFrameSettings();
+
+    if (frame != nullptr) {
+        JavaVMResource vm(pluginJavaVM);
+        //unsigned char *arr = new unsigned char[10];
+        int size = 460800;
+
+        jbyteArray array = vm.env->NewByteArray(size);
+        vm.env->SetByteArrayRegion(array, 0, size, reinterpret_cast<jbyte*>(frame.get()));
+
+        vm.env->CallVoidMethod(customCameraActivity, _pluginEndRenderId, array);
+        //vm.env->CallVoidMethod(customCameraActivity, _pluginEndRenderId, as_byte_array(frame.get(),
+        //            setting.getInputFrameSize().width * setting.getInputFrameSize().height * 3));
+    }
+    */
 }
 
 void YUVFrameInputPlugin::update(const std::list<wikitude::sdk::RecognizedTarget>& recognizedTargets_) {
@@ -383,7 +550,7 @@ void YUVFrameInputPlugin::update(const std::list<wikitude::sdk::RecognizedTarget
         _pluginPausedMethodId = vm.env->GetMethodID(customCameraActivityClass, "onInputPluginPaused", "()V");
         _pluginResumedMethodId = vm.env->GetMethodID(customCameraActivityClass, "onInputPluginResumed", "()V");
         _pluginDestroyedMethodId = vm.env->GetMethodID(customCameraActivityClass, "onInputPluginDestroyed", "()V");
-
+        _pluginEndRenderId =  vm.env->GetMethodID(customCameraActivityClass, "onRenderEnd", "([B)V");
         _jniInitialized = true;
 
 
@@ -524,123 +691,6 @@ void YUVFrameInputPlugin::render() {
         return;
     }
 
-    { // shared_ptr auto release scope
-        std::shared_ptr<unsigned char> presentableFrameData = getPresentableInputFrameData();
-        if (presentableFrameData) {
-            updateFrameTexturesData(_frameWidth, _frameHeight, presentableFrameData.get());
-        }
-    }
-
-    WT_GL_ASSERT(glDisable(GL_DEPTH_TEST));
-
-    WT_GL_ASSERT(glUseProgram(_programHandle));
-
-    WT_GL_ASSERT(glBindBuffer(GL_ARRAY_BUFFER, _vertexBuffer));
-    WT_GL_ASSERT(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, _indexBuffer));
-
-    WT_GL_ASSERT(glEnableVertexAttribArray(_positionAttributeLocation));
-    WT_GL_ASSERT(glEnableVertexAttribArray(_texCoordAttributeLocation));
-
-    WT_GL_ASSERT(glVertexAttribPointer(_positionAttributeLocation, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), 0));
-    WT_GL_ASSERT(glVertexAttribPointer(_texCoordAttributeLocation, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (GLvoid *)(sizeof(float) * 3)));
-
-    bindFrameTextures();
-
-    bindFrameBufferObject();
-
-    GLint viewport[4];
-    glGetIntegerv(GL_VIEWPORT, viewport);
-
-    const float viewportWidth = viewport[2] - viewport[0];
-    const float viewportHeight = viewport[3] - viewport[1];
-
-    WT_GL_ASSERT(glViewport(0, 0, _frameWidth, _frameHeight));
-    WT_GL_ASSERT(glClear(GL_COLOR_BUFFER_BIT));
-    WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
-    unbindFrameBufferObject();
-
-    WT_GL_ASSERT(glViewport(viewport[0], viewport[1], viewport[2], viewport[3]));
-
-    WT_GL_ASSERT(glClear(GL_COLOR_BUFFER_BIT));
-
-    WT_GL_ASSERT(glActiveTexture(GL_TEXTURE0));
-    WT_GL_ASSERT(glBindTexture(GL_TEXTURE_2D, _frameBufferTexture));
-
-    { // mutex auto release scope
-    std::unique_lock<std::mutex> lock(_currentlyRecognizedTargetsMutex);
-
-        if (!_currentlyRecognizedTargets.empty()) {
-
-            // just use one of the targets found, should be sufficient to get the point across
-            const wikitude::sdk::RecognizedTarget targetToDraw = _currentlyRecognizedTargets.front();
-
-            // early unlock to minimize locking duration
-            lock.unlock();
-
-            WT_GL_ASSERT(glUseProgram(_fullscreenTextureShader));
-            setVertexShaderUniforms(_fullscreenTextureShader);
-
-            GLint fullscreenTextureUniformLocation;
-            WT_GL_ASSERT_AND_RETURN(fullscreenTextureUniformLocation, glGetUniformLocation(_fullscreenTextureShader, "uCameraFrameTexture"));
-            WT_GL_ASSERT(glUniform1i(fullscreenTextureUniformLocation, 0));
-
-            setVertexAttributes(_fullscreenTextureShader);
-
-            WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
-
-            const float TARGET_HEIGHT_IN_PIXELS = 320.0f;
-
-            // TODO: can be computed in the ctor
-            wikitude::sdk::Matrix4 quadReuseMatrix;
-            // scale that transforms the fullscreen quad (side length = 2) into a screen
-            // aligned quad with side length = 1, there avoiding additional vertex data to be
-            // required
-            // sadly no attribute-less rendering available on OpenGL ES 2 due to the lack of
-            // gl_VertexId
-            quadReuseMatrix.scale(0.5f, 0.5f, 1.0f);
-
-            wikitude::sdk::Matrix4 targetHeightScaling;
-            targetHeightScaling.scale(TARGET_HEIGHT_IN_PIXELS, TARGET_HEIGHT_IN_PIXELS, 1.0f);
-
-            wikitude::sdk::Matrix4 modelView = targetToDraw.getModelViewMatrix();
-            wikitude::sdk::Matrix4 projection = targetToDraw.getProjectionMatrix();
-
-            wikitude::sdk::Matrix4 sensorRotationCompensation;
-
-            float sensorRotationCompensationAngle = static_cast<float>(_imageSensorRotation);
-            if (!_defaultOrientationLandscape) {
-                sensorRotationCompensationAngle += 90.0f;
-            }
-
-            sensorRotationCompensation.rotateZ(sensorRotationCompensationAngle);
-
-            wikitude::sdk::Matrix4 modelViewProjection = sensorRotationCompensation * projection * modelView * targetHeightScaling * quadReuseMatrix;
-
-            WT_GL_ASSERT(glUseProgram(_augmentationShaderHandle));
-            GLint modelViewProjectionLocation;
-            WT_GL_ASSERT_AND_RETURN(modelViewProjectionLocation, glGetUniformLocation(_augmentationShaderHandle, "uModelViewProjectionMatrix"));
-            WT_GL_ASSERT(glUniformMatrix4fv(modelViewProjectionLocation, 1, GL_FALSE, modelViewProjection.get()));
-
-            setVertexAttributes(_augmentationShaderHandle);
-
-            WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
-        } else {
-            WT_GL_ASSERT(glUseProgram(_scanlineShaderHandle));
-            setVertexShaderUniforms(_scanlineShaderHandle);
-
-            setFragmentShaderUniforms(viewportWidth, viewportHeight);
-            setVertexAttributes(_scanlineShaderHandle);
-
-            WT_GL_ASSERT(glDrawElements(GL_TRIANGLES, sizeof(_indices)/sizeof(_indices[0]), GL_UNSIGNED_SHORT, 0));
-        }
-    }
-
-    WT_GL_ASSERT(glBindBuffer(GL_ARRAY_BUFFER, 0));
-    WT_GL_ASSERT(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0));
-
-    WT_GL_ASSERT(glUseProgram(0));
-
-    WT_GL_ASSERT(glEnable(GL_DEPTH_TEST));
 }
 
 void YUVFrameInputPlugin::createVertexBuffers()

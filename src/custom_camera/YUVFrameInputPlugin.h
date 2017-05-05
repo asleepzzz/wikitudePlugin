@@ -78,6 +78,7 @@ private:
     jmethodID               _pluginPausedMethodId;
     jmethodID               _pluginResumedMethodId;
     jmethodID               _pluginDestroyedMethodId;
+    jmethodID               _pluginEndRenderId;
 
     bool                    _jniInitialized;
 
