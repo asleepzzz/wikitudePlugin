@@ -17,7 +17,7 @@
 
 #include "jniHelper.h"
 
-
+ANativeWindow*    mANativeWindow;
 YUVFrameInputPlugin* YUVFrameInputPlugin::instance;
 
 jobject customCameraActivity;
@@ -280,6 +280,18 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_wikitude_samples_CustomCameraActivity_setFrameSize(JNIEnv* env, jobject obj, jint frameWidth, jint frameHeight)
 {
     YUVFrameInputPlugin::instance->setFrameSize(frameWidth, frameHeight);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_wikitude_samples_CustomCameraActivity_setNativeSurface(JNIEnv* env, jobject surface)
+{
+    __android_log_print(ANDROID_LOG_VERBOSE, APPNAME, "setNativeSurface");
+    JavaVMResource vm(pluginJavaVM);
+    mANativeWindow = ANativeWindow_fromSurface(vm.env, surface);
+
+    if (mANativeWindow == NULL) {
+        __android_log_print(ANDROID_LOG_VERBOSE, APPNAME, "ANativeWindow_fromSurface error");
+    }
 }
 
 YUVFrameInputPlugin::YUVFrameInputPlugin()

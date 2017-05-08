@@ -97,7 +97,7 @@ LOCAL_C_INCLUDES := $(INCLUDE_DIR)/wikitude \
 LOCAL_SRC_FILES := jniHelper.cpp JniRegistration.cpp barcode/BarcodePlugin.cpp custom_camera/YUVFrameInputPlugin.cpp custom_camera/YUVFrameShaderSourceObject.cpp  simple_input_plugin/SimpleInputPlugin.cpp
 
 LOCAL_STATIC_LIBRARIES += zbar iconv aruco opencv_objdetect opencv_calib3d opencv_imgproc opencv_core opencv_hal tbb z WikitudePlugins
-LOCAL_LDLIBS += -llog -lGLESv2
+LOCAL_LDLIBS += -llog -lGLESv2 -landroid
 
 LOCAL_CPPFLAGS = -DOPENCV_VERSION_3
 

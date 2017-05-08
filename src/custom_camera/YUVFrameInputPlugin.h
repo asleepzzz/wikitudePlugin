@@ -26,7 +26,7 @@
 #include <InterfaceOrientation.h>
 
 #include <YUVFrameShaderSourceObject.hpp>
-
+#include <android/native_window_jni.h>
 
 extern JavaVM* pluginJavaVM;
 
