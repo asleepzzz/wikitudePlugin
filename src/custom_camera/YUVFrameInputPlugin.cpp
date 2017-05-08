@@ -283,11 +283,13 @@ Java_com_wikitude_samples_CustomCameraActivity_setFrameSize(JNIEnv* env, jobject
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_wikitude_samples_CustomCameraActivity_setNativeSurface(JNIEnv* env, jobject surface)
+Java_com_wikitude_samples_CustomCameraActivity_setNativeSurface(JNIEnv* env,jobject thiz, jobject surface)
 {
     __android_log_print(ANDROID_LOG_VERBOSE, APPNAME, "setNativeSurface");
     JavaVMResource vm(pluginJavaVM);
-    mANativeWindow = ANativeWindow_fromSurface(vm.env, surface);
+    if (mANativeWindow == NULL) {
+        mANativeWindow = ANativeWindow_fromSurface(env, surface);
+    }
 
     if (mANativeWindow == NULL) {
         __android_log_print(ANDROID_LOG_VERBOSE, APPNAME, "ANativeWindow_fromSurface error");
@@ -333,6 +335,7 @@ _indices{0, 1, 2, 2, 3, 0}
 
 YUVFrameInputPlugin::~YUVFrameInputPlugin()
 {
+    ANativeWindow_release(mANativeWindow);
     releaseFramebufferObject();
     releaseShaderProgram();
     releaseVertexBuffers();
