@@ -380,6 +380,24 @@ void YUVFrameInputPlugin::destroy() {
 }
 
 void YUVFrameInputPlugin::startRender() {
+    /*hacking android native*/
+/*
+    ANativeWindow_Buffer nwBuffer;
+    int lockResult = 0;
+    lockResult = ANativeWindow_lock(mANativeWindow, &nwBuffer, 0);
+    if (0 != lockResult) {
+        __android_log_print(ANDROID_LOG_VERBOSE, APPNAME, "ANativeWindow_lock error %d",lockResult);
+        return;
+    } else {
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "ANativeWindow_lock nwBuffer->format  %d", nwBuffer.format);
+        __android_log_print(ANDROID_LOG_ERROR, APPNAME, "ANativeWindow_lock width height stride  %d %d %d", nwBuffer.width,nwBuffer.height,nwBuffer.stride);
+        __uint32_t * line = (__uint32_t *) nwBuffer.bits;
+        memset(nwBuffer.bits, 0, 640*480*4);
+        ANativeWindow_unlockAndPost(mANativeWindow);
+    }
+*/
+    /*end*/
+
 
 
 }
@@ -514,6 +532,7 @@ void YUVFrameInputPlugin::endRender() {
         }
     }
 
+
     int size = 1080*1920*4;
     GLubyte *data = (GLubyte *)malloc(size);
     WT_GL_ASSERT(glReadPixels(0, 0 , 1920, 1080, GL_RGBA, GL_UNSIGNED_BYTE, data));
@@ -524,6 +543,7 @@ void YUVFrameInputPlugin::endRender() {
     WT_GL_ASSERT(glUseProgram(0));
 
     WT_GL_ASSERT(glEnable(GL_DEPTH_TEST));
+
 
     if (data != nullptr) {
         JavaVMResource vm(pluginJavaVM);
